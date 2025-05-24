@@ -55,6 +55,11 @@ class Metrics:
         self.collision_num = 0
         self.dropped_due_to_capacity = 0  # Task 2 için: UAV'in kapasitesini aşan paketler
         self.packets_dropped_due_to_capacity = 0
+        self.offloaded_tasks = 0
+        self.locally_processed_tasks = 0
+        self.compute_wait_times = []
+        self.offloaded_packet_logs = []        # (packet_id, source_node_id, target_node_id, time)
+
 
     def print_metrics(self):
         # calculate the average end-to-end delay
@@ -105,6 +110,8 @@ class Metrics:
             file.write(f"Average UAV Capacity (MB/s): {avg_uav_capacity}\n")
             file.write(f"Dropped Packets (Capacity Constraint): {self.dropped_due_to_capacity}\n")
             file.write(f"Packets Dropped due to Capacity Limits: {self.packets_dropped_due_to_capacity}\n")
+            file.write(f"Total Offloaded Tasks: {self.offloaded_tasks}")
+            file.write(f"Total Locally Processed Tasks: {self.locally_processed_tasks}")
             file.write(f"--------------------------------------------\n\n")
 
         # Print to console
@@ -122,5 +129,8 @@ class Metrics:
         print('UAV Capacities:', self.uav_capacities)
         print('Average UAV Capacity (MB/s):', avg_uav_capacity)
         print('Packets Dropped due to Capacity Limits:', self.packets_dropped_due_to_capacity)
+        print(f"Total Offloaded Tasks: {self.offloaded_tasks}")
+        print(f"Total Locally Processed Tasks: {self.locally_processed_tasks}")
+
 
 

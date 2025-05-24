@@ -88,7 +88,6 @@ class Gpsr:
         return has_route, packet, enquire
 
     def packet_reception(self, packet, src_drone_id):
-        print(f"[HELLO] {self.my_drone.identifier} received HELLO from {packet.src_drone.identifier}")
 
         """
         Packet reception at network layer

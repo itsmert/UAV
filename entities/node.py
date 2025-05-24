@@ -20,6 +20,7 @@ from topology.virtual_force.vf_motion_control import VfMotionController
 from energy.energy_model import EnergyModel
 from utils import config
 from utils.util_function import has_intersection
+from utils.util_function import euclidean_distance
 from phy.large_scale_fading import sinr_calculator
 
 # config logging
@@ -217,7 +218,8 @@ class Node:
                     if drone.sensor_drone_flag == 1
                     and drone.identifier != self.identifier
                 ]
-                destination = random.choice(drone_candidates)
+                destination = random.choice(drone_candidates) #In that here we need to do that not generate random choice for destination
+                #bcs when we do off-loading mechanism we need to choose directly nearest as self as random.expovariate(rate)
                 dst_id = destination.identifier
                 destination = self.simulator.drones[dst_id]
 
@@ -271,75 +273,86 @@ class Node:
         return flag
 
     def feed_packet(self):
-
         """
-        It should be noted that this function is designed for those packets which need to compete for wireless channel
-
-        Firstly, all packets received or generated will be put into the "transmitting_queue", every very short
-        time, the drone will read the packet in the head of the "transmitting_queue". Then the drone will check
-        if the packet is expired (exceed its maximum lifetime in the network), check the type of packet:
-        1) data packet: check if the data packet exceeds its maximum re-transmission attempts. If the above inspection
-           passes, routing protocol is executed to determine the next hop drone. If next hop is found, then this data
-           packet is ready to transmit, otherwise, it will be put into the "waiting_queue".
-        2) control packet: no need to determine next hop, so it will directly start waiting for buffer
-
-        :return: none
+        Handles packets in the transmitting queue.
+        If the packet is a DataPacket, checks if the UAV can process it.
+        If not, tries to offload to another neighbor UAV with better capacity.
         """
-
-        
 
         while True:
-            if not self.sleep:  # if drone still has enough energy to relay packets
-                
-                yield self.env.timeout(10)  # for speed up the simulation
+            if not self.sleep:
+                yield self.env.timeout(10)  # speed up simulation step
 
-                if not self.blocking():
+                if not self.blocking() and not Node.transmitting_queue.empty():
+                    packet = Node.transmitting_queue.get()
 
-                    
-                    
-                    if not Node.transmitting_queue.empty():
-                        
-                        packet = Node.transmitting_queue.get()  # get the packet at the head of the queue
+                    if self.env.now >= packet.creation_time + packet.deadline:
+                        continue  # skip expired packet
 
-                        if self.env.now < packet.creation_time + packet.deadline:  # this packet has not expired
-                            if isinstance(packet, DataPacket):
-                                # 🔴 DROP POLICY: if required_rate > processing_capacity
-                                required_rate = packet.size_mb / packet.processing_time
-                                if hasattr(self, 'processing_capacity') and required_rate > self.processing_capacity:
+                    if isinstance(packet, DataPacket):
+                        if packet.processing_time == 0:
+                            logging.error(f"[ERROR] Packet {packet.packet_id} has zero processing time, skipping.")
+                            continue  # bu paketi atla
+
+                        required_rate = packet.size_mb / packet.processing_time
+
+                        if hasattr(self, 'processing_capacity'):
+                            print(
+                                f"[CHECK] Node {self.identifier} - Required Rate: {required_rate:.2f} MB/s, Capacity: {self.processing_capacity:.2f} MB/s")
+
+                            if required_rate > self.processing_capacity * 0.7:
+                                best_uav = None
+                                best_score = -1
+
+                                for drone_id in self.routing_protocol.neighbor_table.neighbor_table.keys():
+                                    drone = self.simulator.drones[drone_id]
+                                    if hasattr(drone, 'processing_capacity'):
+                                        score = drone.processing_capacity - required_rate
+                                        distance = euclidean_distance(self.coords, drone.coords)
+                                        if score > 0 and distance > 0 and (
+                                                best_uav is None or score / distance > best_score):
+                                            best_uav = drone
+                                            best_score = score / distance
+
+                                if best_uav:
+                                    print(
+                                        f"[OFFLOAD] Packet {packet.packet_id} offloaded from Node {self.identifier} to Node {best_uav.identifier}")
+                                    self.simulator.metrics.offloaded_packet_logs.append({
+                                        "packet_id": packet.packet_id,
+                                        "from": self.identifier,
+                                        "to": best_uav.identifier
+                                    })
+
+                                    best_uav.compute_queue.put(packet)
+
+                                    self.simulator.metrics.offloaded_tasks += 1
+                                    self.simulator.metrics.offloaded_packet_logs.append(
+                                        (packet.packet_id, self.identifier, best_uav.identifier, self.env.now)
+                                    )
+                                    continue
+                                else:
                                     logging.warning(
-                                        '[DROP] Packet %s dropped at Node %s due to insufficient processing rate (%.2f > %.2f MB/s)',
+                                        '[DROP] Packet %s dropped at Node %s due to insufficient processing rate and no offload target (%.2f > %.2f MB/s)',
                                         packet.packet_id, self.identifier, required_rate, self.processing_capacity)
-                                    self.simulator.metrics.packets_dropped_due_to_capacity += 1  # ← metrik olarak say (metrics.py’ye eklenecek)
-                                    continue  # skip
-                                if packet.number_retransmission_attempt[self.identifier] < config.MAX_RETRANSMISSION_ATTEMPT:
-                                    print(f"[FEED] Node {self.identifier} reading packet {packet.packet_id}")
-                                    # UAV bu paketi işleyebilir mi?
+                                    self.simulator.metrics.packets_dropped_due_to_capacity += 1
+                                    continue
 
+                        if packet.number_retransmission_attempt[self.identifier] < config.MAX_RETRANSMISSION_ATTEMPT:
+                            print(f"[FEED] Node {self.identifier} reading packet {packet.packet_id}")
+                            has_route, final_packet, enquire = self.routing_protocol.next_hop_selection(packet)
 
-                                    #print("here noww\n")
-                                    # it should be noted that "final_packet" may be the data packet itself or a control
-                                    # packet, depending on whether the routing protocol can find an appropriate next hop
-                                    has_route, final_packet, enquire = self.routing_protocol.next_hop_selection(packet)
-
-                                    if has_route:
-                                        logging.info('Sensor: %s obtain the next hop: %s of data packet (id: %s)',
-                                                     self.identifier, packet.next_hop_id, packet.packet_id)
-
-                                        # in this case, the "final_packet" is actually the data packet
-                                        yield self.env.process(self.packet_coming(final_packet))
-                                    else:
-                                        self.waiting_list.append(packet)
-
-                                        if enquire:
-                                            # in this case, the "final_packet" is actually the control packet
-                                            yield self.env.process(self.packet_coming(final_packet))
-
-                            else:  # control packet but not ack
-                                yield self.env.process(self.packet_coming(packet))
-                        else:
-                            pass  # means dropping this data packet for expiration
-            else:  # this drone runs out of energy
-                break  # it is important to break the while loop
+                            if has_route:
+                                logging.info('Sensor: %s obtained next hop: %s for packet: %s',
+                                             self.identifier, packet.next_hop_id, packet.packet_id)
+                                yield self.env.process(self.packet_coming(final_packet))
+                            else:
+                                self.waiting_list.append(packet)
+                                if enquire:
+                                    yield self.env.process(self.packet_coming(final_packet))
+                    else:
+                        yield self.env.process(self.packet_coming(packet))
+            else:
+                break  # out of energy
 
     def packet_coming(self, pkd):
         """
